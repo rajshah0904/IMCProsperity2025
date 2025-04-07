@@ -21,19 +21,18 @@ class Trader:
         self.last_signal_iteration = 0
         self.last_trade_iteration = 0
 
-        # Pairs Trading Parameters - Optimized based on performance data
-        self.pairs_position_limit = 15  # Smaller position limit to be safer
-        self.pairs_position_size = 3    # Smaller trade size
-        self.short_window = 3          
-        self.long_window = 10           
-        self.volatility_window = 5      
-        self.min_profit_threshold = 0.0005  
+        # Pairs Trading Parameters
+        self.pairs_position_limit = 15
+        self.pairs_position_size = 3
+        self.short_window = 3
+        self.long_window = 10
+        self.target_ratio = 0.90  # SQUID_INK/KELP target ratio
+        self.ratio_std = 0.02
         
         # Price history for pairs
         self.squid_prices = deque(maxlen=50)
         self.kelp_prices = deque(maxlen=50)
         self.ratio_history = deque(maxlen=50)
-        self.spread_history = deque(maxlen=50)
         
         # Position tracking
         self.positions = {"SQUID_INK": 0, "KELP": 0}
@@ -43,26 +42,8 @@ class Trader:
         self.trades_made = 0
         self.profitable_trades = 0
         
-        # Initial ratio parameters - dynamically updated
-        self.target_ratio = 0.90        # SQUID_INK/KELP target ratio (adjusted based on data)
-        self.ratio_std = 0.02           
-        
-        # Adaptive position sizing
-        self.max_position_held = 0
-        self.min_profit_target = 5     # Lower profit target for more trades
-        
-        # Trend detection
-        self.trend_strength = 0
-        self.regime = "neutral"         
-        
-        # Execution optimization
-        self.squid_avg_fill = 0
-        self.kelp_avg_fill = 0
-        self.historical_pl = 0
-        
-        # Force initial trades to build history
-        self.force_initial_trades = True
-        self.initial_trades_count = 0
+        # Force initial trades
+        self.first_iteration = True
 
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
         if not order_depth.buy_orders and not order_depth.sell_orders:
@@ -224,8 +205,8 @@ class Trader:
         
         return ratio_dev, momentum, threshold, spread_momentum
 
-    def pairs_trade(self, squid_depth: OrderDepth, kelp_depth: OrderDepth, pl_diff: float) -> List[Order]:
-        """Implement pairs trading strategy with dynamic risk management"""
+    def pairs_trade(self, squid_depth: OrderDepth, kelp_depth: OrderDepth) -> List[Order]:
+        """Simplified pairs trading strategy that guarantees execution"""
         orders = []
         
         # Get mid prices
@@ -240,125 +221,81 @@ class Trader:
         squid_mid = (squid_best_bid + squid_best_ask) / 2
         kelp_mid = (kelp_best_bid + kelp_best_ask) / 2
         
-        # Force initial trades to build price history if needed
-        if self.force_initial_trades and self.initial_trades_count < 2:
-            # Small initial position to establish history
+        # Force initial trade on first iteration to get started
+        if self.first_iteration:
             orders.append(Order("SQUID_INK", squid_best_ask, 1))
             orders.append(Order("KELP", kelp_best_ask, 1))
-            self.initial_trades_count += 1
-            self.last_trade_iteration = self.iteration
+            self.first_iteration = False
             return orders
         
-        # Calculate signals with P&L feedback
-        ratio_dev, momentum, threshold, spread_momentum = self.calculate_pair_signals(squid_mid, kelp_mid, pl_diff)
+        # Add latest prices
+        self.squid_prices.append(squid_mid)
+        self.kelp_prices.append(kelp_mid)
+        
+        # Calculate current ratio
+        if kelp_mid == 0:
+            return orders
+            
+        ratio = squid_mid / kelp_mid
+        self.ratio_history.append(ratio)
+        
+        # Need enough history
+        if len(self.ratio_history) < self.short_window:
+            return orders
+            
+        # Calculate short and long term averages
+        short_avg = np.mean(list(self.ratio_history)[-self.short_window:])
+        long_avg = np.mean(list(self.ratio_history)[-self.long_window:]) if len(self.ratio_history) >= self.long_window else short_avg
+        
+        # Calculate z-score (how many standard deviations from target)
+        dev = (ratio - self.target_ratio) / self.ratio_std
         
         # Current positions
         squid_pos = self.positions["SQUID_INK"]
         kelp_pos = self.positions["KELP"]
         
-        # Dynamic position sizing based on multiple factors
-        base_size = self.pairs_position_size
+        # Trade size
+        size = self.pairs_position_size
         
-        # Scale based on signal strength
-        signal_strength = min(1.5, abs(ratio_dev) / threshold)
-        dynamic_size = max(1, min(base_size, int(base_size * signal_strength)))
-        
-        # Increase position size when winning, decrease when losing
-        if pl_diff > 0:
-            dynamic_size = min(dynamic_size + 1, self.pairs_position_limit // 5)
-        elif pl_diff < -50:  # If losing substantially
-            dynamic_size = max(1, dynamic_size - 1)
-            
-        # Key trading signals
-        squid_overvalued = ratio_dev > threshold and (momentum > 0 or spread_momentum > 0)
-        squid_undervalued = ratio_dev < -threshold and (momentum < 0 or spread_momentum < 0)
-        
-        # Force smaller trade size for initial trades
-        if abs(squid_pos) < 2 or abs(kelp_pos) < 2:
-            dynamic_size = 1
-        
-        # Primary trading logic
-        if squid_overvalued:
-            # SQUID_INK overvalued - sell SQUID_INK, buy KELP
+        # Simple trading logic with guaranteed execution
+        if dev > 1.0:  # SQUID_INK overvalued
+            # Ensure we don't exceed position limits
             if squid_pos > -self.pairs_position_limit and kelp_pos < self.pairs_position_limit:
-                # Scale order size based on distance from position limit
+                # Available position capacity
                 available_squid = self.pairs_position_limit + squid_pos
                 available_kelp = self.pairs_position_limit - kelp_pos
-                size = min(dynamic_size, available_squid, available_kelp)
+                trade_size = min(size, available_squid, available_kelp)
                 
-                if size > 0:
-                    # Track trade
-                    self.last_trade_iteration = self.iteration
-                    
-                    # Use better execution prices - immediately cross spread if signal is strong
-                    squid_price = squid_best_bid if ratio_dev < threshold * 1.5 else squid_best_bid - 1
-                    kelp_price = kelp_best_ask if ratio_dev < threshold * 1.5 else kelp_best_ask + 1
-                    
-                    orders.append(Order("SQUID_INK", squid_price, -size))
-                    orders.append(Order("KELP", kelp_price, size))
-                
-        elif squid_undervalued:
-            # SQUID_INK undervalued - buy SQUID_INK, sell KELP
+                if trade_size > 0:
+                    # Market orders to ensure execution
+                    orders.append(Order("SQUID_INK", squid_best_bid, -trade_size))
+                    orders.append(Order("KELP", kelp_best_ask, trade_size))
+        
+        elif dev < -1.0:  # SQUID_INK undervalued
+            # Ensure we don't exceed position limits
             if squid_pos < self.pairs_position_limit and kelp_pos > -self.pairs_position_limit:
-                # Scale order size based on distance from position limit
+                # Available position capacity
                 available_squid = self.pairs_position_limit - squid_pos
                 available_kelp = self.pairs_position_limit + kelp_pos
-                size = min(dynamic_size, available_squid, available_kelp)
+                trade_size = min(size, available_squid, available_kelp)
                 
-                if size > 0:
-                    # Track trade
-                    self.last_trade_iteration = self.iteration
-                    
-                    # Use better execution prices
-                    squid_price = squid_best_ask if abs(ratio_dev) < threshold * 1.5 else squid_best_ask + 1
-                    kelp_price = kelp_best_bid if abs(ratio_dev) < threshold * 1.5 else kelp_best_bid - 1
-                    
-                    orders.append(Order("SQUID_INK", squid_price, size))
-                    orders.append(Order("KELP", kelp_price, -size))
+                if trade_size > 0:
+                    # Market orders to ensure execution
+                    orders.append(Order("SQUID_INK", squid_best_ask, trade_size))
+                    orders.append(Order("KELP", kelp_best_bid, -trade_size))
         
-        # More aggressive profit taking when approaching extreme positions
-        profit_threshold = self.min_profit_threshold
-        position_pct = abs(squid_pos) / self.pairs_position_limit
-        
-        # Reduce profit threshold as position grows
-        if position_pct > 0.5:
-            profit_threshold = self.min_profit_threshold * 0.75
-        
-        # Profit taking with dynamic thresholds
-        if abs(ratio_dev) < threshold * 0.4 or (position_pct > 0.7 and (ratio_dev * squid_pos) < 0):
-            # Close SQUID_INK positions when profitable or when signal reverses with large position
-            if squid_pos > 0 and squid_best_bid > self.position_values["SQUID_INK"] * (1 + profit_threshold):
-                orders.append(Order("SQUID_INK", squid_best_bid, -min(dynamic_size, squid_pos)))
-                self.last_trade_iteration = self.iteration
-            elif squid_pos < 0 and squid_best_ask < self.position_values["SQUID_INK"] * (1 - profit_threshold):
-                orders.append(Order("SQUID_INK", squid_best_ask, min(dynamic_size, -squid_pos)))
-                self.last_trade_iteration = self.iteration
-            
-            # Close KELP positions
-            if kelp_pos > 0 and kelp_best_bid > self.position_values["KELP"] * (1 + profit_threshold):
-                orders.append(Order("KELP", kelp_best_bid, -min(dynamic_size, kelp_pos)))
-                self.last_trade_iteration = self.iteration
-            elif kelp_pos < 0 and kelp_best_ask < self.position_values["KELP"] * (1 - profit_threshold):
-                orders.append(Order("KELP", kelp_best_ask, min(dynamic_size, -kelp_pos)))
-                self.last_trade_iteration = self.iteration
-        
-        # Emergency risk management - reduce position when losing significantly
-        if pl_diff < -100 and abs(squid_pos) > self.pairs_position_limit / 2:
-            # Cut position by half when in significant drawdown
+        # Simple profit taking
+        elif abs(dev) < 0.3:  # Close to target ratio
             if squid_pos > 0:
-                orders.append(Order("SQUID_INK", squid_best_bid, -min(squid_pos // 2, 5)))
-                self.last_trade_iteration = self.iteration
+                orders.append(Order("SQUID_INK", squid_best_bid, -min(size, squid_pos)))
             elif squid_pos < 0:
-                orders.append(Order("SQUID_INK", squid_best_ask, min(-squid_pos // 2, 5)))
-                self.last_trade_iteration = self.iteration
+                orders.append(Order("SQUID_INK", squid_best_ask, min(size, -squid_pos)))
                 
             if kelp_pos > 0:
-                orders.append(Order("KELP", kelp_best_bid, -min(kelp_pos // 2, 5)))
-                self.last_trade_iteration = self.iteration
+                orders.append(Order("KELP", kelp_best_bid, -min(size, kelp_pos)))
             elif kelp_pos < 0:
-                orders.append(Order("KELP", kelp_best_ask, min(-kelp_pos // 2, 5)))
-                self.last_trade_iteration = self.iteration
-        
+                orders.append(Order("KELP", kelp_best_ask, min(size, -kelp_pos)))
+                
         return orders
 
     def run(self, state: TradingState):
@@ -406,37 +343,17 @@ class Trader:
 
             result[self.product] = orders
 
-        # Pairs trade SQUID_INK and KELP
-        squid_orders = []
-        kelp_orders = []
-        
+        # Pairs trade SQUID_INK and KELP - aggressive execution
         if "SQUID_INK" in state.order_depths and "KELP" in state.order_depths:
             pairs_orders = self.pairs_trade(
                 state.order_depths["SQUID_INK"],
-                state.order_depths["KELP"],
-                pl_diff
+                state.order_depths["KELP"]
             )
             
-            # Split orders by product
+            # Split orders by product and add to result
             squid_orders = [order for order in pairs_orders if order.symbol == "SQUID_INK"]
             kelp_orders = [order for order in pairs_orders if order.symbol == "KELP"]
             
-            # Ensure we're not exceeding position limits
-            if "SQUID_INK" in state.position:
-                squid_pos = state.position["SQUID_INK"]
-                for order in squid_orders[:]:
-                    if (squid_pos + order.quantity > self.pairs_position_limit or 
-                        squid_pos + order.quantity < -self.pairs_position_limit):
-                        squid_orders.remove(order)
-            
-            if "KELP" in state.position:
-                kelp_pos = state.position["KELP"]
-                for order in kelp_orders[:]:
-                    if (kelp_pos + order.quantity > self.pairs_position_limit or 
-                        kelp_pos + order.quantity < -self.pairs_position_limit):
-                        kelp_orders.remove(order)
-            
-            # Make sure we have valid orders after filtering
             if squid_orders:
                 result["SQUID_INK"] = squid_orders
             if kelp_orders:
@@ -450,7 +367,6 @@ class Trader:
                     depth = state.order_depths[product]
                     if depth.buy_orders and depth.sell_orders:
                         mid_price = (max(depth.buy_orders.keys()) + min(depth.sell_orders.keys())) / 2
-                        # Only update position value if we have a position
                         if self.positions[product] != 0:
                             self.position_values[product] = mid_price
 
