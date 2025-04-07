@@ -2,7 +2,7 @@ from datamodel import Order, OrderDepth, TradingState
 from typing import Dict, List
 import numpy as np
 
-class Trader:
+class ResinMarketMaker:
     def __init__(self):
         # Base parameters
         self.base_spread = 4
@@ -111,4 +111,4 @@ class Trader:
         traderData = ""  # No state to track across rounds yet
         conversions = 0  # No conversion logic used for now
         
-        return result, conversions, traderData
+        return result, conversions, traderData 
