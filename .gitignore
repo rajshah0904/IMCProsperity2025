@@ -1,0 +1,18 @@
+# Backtesting files
+backtesting.py
+backtest_*.csv
+backtest_pnl.csv
+backtest_trades.csv
+
+# Round 1 data files
+round-1-island-data-bottle/
+prices_round_1_*.csv
+trades_round_1_*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook
+.ipynb_checkpoints
