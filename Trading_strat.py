@@ -21,7 +21,8 @@ class Trader:
         self.last_signal_iteration = 0
         self.last_trade_iteration = 0
 
-        # Pairs Trading Parameters
+        # Pairs Trading Parameters - Currently disabled to avoid losses
+        self.do_pairs_trading = False  # Turn off pairs trading
         self.pairs_position_limit = 15
         self.pairs_position_size = 3
         self.short_window = 3
@@ -209,6 +210,30 @@ class Trader:
         """Simplified pairs trading strategy that guarantees execution"""
         orders = []
         
+        # If we've turned off pairs trading, return empty orders list
+        if not self.do_pairs_trading:
+            # If we have existing positions, close them out
+            squid_pos = self.positions.get("SQUID_INK", 0)
+            kelp_pos = self.positions.get("KELP", 0)
+            
+            if squid_pos != 0 or kelp_pos != 0:
+                # Close out positions if we have any
+                if squid_pos > 0 and squid_depth.buy_orders:
+                    squid_price = max(squid_depth.buy_orders.keys())
+                    orders.append(Order("SQUID_INK", squid_price, -squid_pos))
+                elif squid_pos < 0 and squid_depth.sell_orders:
+                    squid_price = min(squid_depth.sell_orders.keys())
+                    orders.append(Order("SQUID_INK", squid_price, -squid_pos))
+                
+                if kelp_pos > 0 and kelp_depth.buy_orders:
+                    kelp_price = max(kelp_depth.buy_orders.keys())
+                    orders.append(Order("KELP", kelp_price, -kelp_pos))
+                elif kelp_pos < 0 and kelp_depth.sell_orders:
+                    kelp_price = min(kelp_depth.sell_orders.keys())
+                    orders.append(Order("KELP", kelp_price, -kelp_pos))
+            
+            return orders
+        
         # Get mid prices
         squid_best_bid = max(squid_depth.buy_orders.keys()) if squid_depth.buy_orders else 0
         squid_best_ask = min(squid_depth.sell_orders.keys()) if squid_depth.sell_orders else float('inf')
@@ -343,7 +368,7 @@ class Trader:
 
             result[self.product] = orders
 
-        # Pairs trade SQUID_INK and KELP - aggressive execution
+        # Pairs trade SQUID_INK and KELP - Only if enabled
         if "SQUID_INK" in state.order_depths and "KELP" in state.order_depths:
             pairs_orders = self.pairs_trade(
                 state.order_depths["SQUID_INK"],
@@ -382,7 +407,7 @@ class Trader:
                 current_ratio = squid_mid / kelp_mid
                 
                 debug_info = f"Iter: {self.iteration}, Ratio: {current_ratio:.3f}, Target: {self.target_ratio:.3f}, "
-                debug_info += f"Last Signal: {self.last_signal_iteration}, Last Trade: {self.last_trade_iteration}, "
+                debug_info += f"Pairs Trading Enabled: {self.do_pairs_trading}, "
                 debug_info += f"SQUID pos: {self.positions.get('SQUID_INK', 0)}, KELP pos: {self.positions.get('KELP', 0)}, "
                 debug_info += f"Orders: SQUID {len(squid_orders)}, KELP {len(kelp_orders)}"
 
