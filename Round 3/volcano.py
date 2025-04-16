@@ -165,6 +165,26 @@ class Trader:
         else:
             return "BUY_OPTION", scaled_quantity
 
+    def black_scholes_implied_vol(self, St, Vt, K, TTE):
+        """Approximate implied volatility using a simple method."""
+        # Simple approximation or fixed value
+        return 0.2  # Example fixed value for simplicity
+
+    def compute_mt_vt(self, St, K, TTE, Vt):
+        """Compute m_t and v_t for given parameters."""
+        m_t = np.log(K / St) / np.sqrt(TTE)
+        v_t = self.black_scholes_implied_vol(St, Vt, K, TTE)
+        return m_t, v_t
+
+    def smooth_vt(self, vt_values):
+        """Simple moving average to smooth v_t values."""
+        if len(vt_values) < 3:
+            return vt_values
+        smoothed = []
+        for i in range(1, len(vt_values) - 1):
+            smoothed.append((vt_values[i-1] + vt_values[i] + vt_values[i+1]) / 3)
+        return smoothed
+
     def run(self, state: TradingState):
         """
         Options trading strategy using improved prediction and risk management
@@ -200,7 +220,7 @@ class Trader:
                 predicted_price, confidence = self.predict_future_price()
                 
                 if predicted_price is not None:
-                    # Check each option
+                    vt_values = []
                     for option_name, strike_price in self.options.items():
                         if option_name in state.order_depths:
                             option_depth = state.order_depths[option_name]
@@ -211,6 +231,15 @@ class Trader:
                                 
                                 # Update option price history
                                 self.update_price_history(option_name, option_mid_price)
+                                
+                                # Compute m_t and v_t
+                                TTE = 1  # Placeholder for actual time to expiry
+                                m_t, v_t = self.compute_mt_vt(spot_mid_price, strike_price, TTE, option_mid_price)
+                                vt_values.append(v_t)
+                                
+                                # Use m_t and v_t to evaluate opportunities
+                                # Example: print or log the values
+                                print(f"m_t: {m_t}, v_t: {v_t}")
                                 
                                 # Check stop loss
                                 if self.check_stop_loss(option_name, option_mid_price):
@@ -267,5 +296,9 @@ class Trader:
                                             result[option_name] = [Order(option_name, option_best_ask, final_quantity)]
                                             result[self.underlying] = [Order(self.underlying, spot_best_bid, -final_quantity)]
                                             self.last_trade_prices[option_name] = option_mid_price
+
+                    # Smooth v_t values
+                    smoothed_vt = self.smooth_vt(vt_values)
+                    print(f"Smoothed v_t: {smoothed_vt}")
         
         return result, 0, str(self.current_capital)  # Return current capital as string 
