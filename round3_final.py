@@ -4,9 +4,37 @@ from collections import deque, defaultdict
 from typing import Dict, List
 from datamodel import Order, OrderDepth, TradingState
 import jsonpickle  # if needed for further serialization
+import logging
 
 class Trader:
     def __init__(self):
+        # ========= COMMON VARIABLES =========
+        self.positions = {}
+        self.logger = set_up_logger("trader", logging.ERROR)
+        self.pattern_products = ["SQUID_INK", "KELP"]
+
+        # ========= PATTERN RECOGNITION VARIABLES =========
+        self.position_limit_pattern = 50
+        self.iteration_pattern = 0
+        
+        # Save price history
+        self.pattern_price_history = {
+            "SQUID_INK": deque(maxlen=50),
+            "KELP": deque(maxlen=50)
+        }
+        
+        # Initialize data structures for both products
+        self.recent_highs = {"SQUID_INK": deque(maxlen=10), "KELP": deque(maxlen=10)}
+        self.recent_lows = {"SQUID_INK": deque(maxlen=10), "KELP": deque(maxlen=10)}
+        self.rsi_values = {"SQUID_INK": deque(maxlen=20), "KELP": deque(maxlen=20)}
+        self.volatility_values = {"SQUID_INK": deque(maxlen=20), "KELP": deque(maxlen=20)}
+        self.positions_pattern = {"SQUID_INK": 0, "KELP": 0}
+        self.trade_duration = {"SQUID_INK": 0, "KELP": 0}
+        self.market_state = {"SQUID_INK": "neutral", "KELP": "neutral"}
+        self.pattern_detected = {"SQUID_INK": None, "KELP": None}
+        self.trade_started_at = {"SQUID_INK": 0, "KELP": 0}
+        
+        # ========= CONVERSION VARIABLES =========
         # ========= Sub-accounts for each strategy ==========
         self.resin_positions: Dict[str, int] = defaultdict(int)
         self.pattern_positions: Dict[str, int] = defaultdict(int)
@@ -25,39 +53,22 @@ class Trader:
 
         # ========= Pattern Recognition Parameters ==========
         self.alloc_pattern = 0.34
-        self.iteration_pattern = 0
-        self.pattern_products = ["SQUID_INK"]
-        self.pattern_price_history = {
-            "SQUID_INK": deque(maxlen=100)
-        }
-        self.recent_highs = {"SQUID_INK": deque(maxlen=10)}
-        self.recent_lows = {"SQUID_INK": deque(maxlen=10)}
         self.rsi_period = 14
-        self.rsi_values = {"SQUID_INK": deque(maxlen=20)}
         self.rsi_oversold = 30
         self.rsi_overbought = 70
         self.volatility_window_pattern = 20
-        self.volatility_values = {"SQUID_INK": deque(maxlen=50)}
         self.volatility_breakout_threshold = 1.5
-        self.positions_pattern = {"SQUID_INK": 0}
-        self.position_limit_pattern = int(15 * self.alloc_pattern)
         self.base_trade_size = int(3 * self.alloc_pattern)
         self.max_trade_size = int(7 * self.alloc_pattern)
-        self.trade_duration = {"SQUID_INK": 0}
         self.max_trade_duration = 15
-        self.market_state = {"SQUID_INK": "neutral"}
-        self.pattern_detected = {"SQUID_INK": None}
         self.historical_pl = 0
-        self.trade_started_at = {"SQUID_INK": 0}
 
         # ========= Volcano Options Parameters ==========
         self.volcano_underlying = "VOLCANIC_ROCK"
+        # Focus only on the options that were profitable in previous testing
         self.volcano_options = {
-            "VOLCANIC_ROCK_VOUCHER_9500": 9500,
-            "VOLCANIC_ROCK_VOUCHER_9750": 9750,
             "VOLCANIC_ROCK_VOUCHER_10000": 10000,
-            "VOLCANIC_ROCK_VOUCHER_10250": 10250,
-            "VOLCANIC_ROCK_VOUCHER_10500": 10500
+            "VOLCANIC_ROCK_VOUCHER_10250": 10250
         }
         self.volcano_position_limits = {self.volcano_underlying: 300}
         for option in self.volcano_options:
@@ -67,16 +78,32 @@ class Trader:
         for option in self.volcano_options:
             self.volcano_price_history[option] = deque(maxlen=100)
 
-        self.volcano_confidence_threshold = 0.7
-        self.volcano_min_profit = 10
-        self.volcano_safety_margin = 0.05
-        self.volcano_base_quantity = 25
+        self.volcano_confidence_threshold = 0.8  # Increased from 0.7 for higher confidence
+        self.volcano_min_profit = 15  # Increased from 10 for higher profit margin
+        self.volcano_safety_margin = 0.08  # Increased from 0.05 for safer trades
+        self.volcano_base_quantity = 20  # Reduced from 25 for smaller positions
         self.volcano_max_drawdown = 0.1
         self.volcano_stop_loss = 0.05
         self.volcano_initial_capital = 0
         self.volcano_current_capital = 0
         self.volcano_max_capital = 0
         self.volcano_last_trade_prices = {}
+        
+        # Product performance tracker
+        self.product_performance = defaultdict(float)
+
+    # Add a method to track product performance
+    def update_product_performance(self, product, profit):
+        self.product_performance[product] += profit
+        
+    # Add a method to check if a product is profitable to trade
+    def is_profitable_to_trade(self, product):
+        # If we have no performance data, be conservative
+        if product not in self.product_performance:
+            return False
+        
+        # Check if the product has been profitable
+        return self.product_performance[product] >= 0
 
     #
     # ========= Utility Methods =========
@@ -99,8 +126,22 @@ class Trader:
 
     def combine_orders_no_netting(self, orders_list: List[Dict[str, List[Order]]]) -> Dict[str, List[Order]]:
         combined: Dict[str, List[Order]] = {}
+        
+        # List of losing products from the analysis
+        losing_products = [
+            "SQUID_INK",
+            "VOLCANIC_ROCK_VOUCHER_10500",
+            "VOLCANIC_ROCK_VOUCHER_9500",
+            "VOLCANIC_ROCK_VOUCHER_9750"
+        ]
+        
         for strat_orders in orders_list:
             for product, orders in strat_orders.items():
+                # Skip products we know are losing money
+                if product in losing_products:
+                    continue
+                    
+                # Focus only on products that are profitable
                 if product != self.volcano_underlying:  # Don't include orders for volcano underlying
                     if product not in combined:
                         combined[product] = []
@@ -145,17 +186,17 @@ class Trader:
         if len(self.resin_price_history) > self.volatility_window:
             self.resin_price_history.pop(0)
 
-        pos_imbalance = 0  # (Could be computed based on your current position.)
-        buy_size = max(1, int(self.base_position_size * (1 - pos_imbalance)))
-        sell_size = max(1, int(self.base_position_size * (1 + pos_imbalance)))
+        # More aggressive position sizing
+        buy_size = max(5, int(self.base_position_size * 1.5))  # Increased size
+        sell_size = max(5, int(self.base_position_size * 1.5))  # Increased size
 
-        buy_price = fair_value - spread // 2
-        if buy_price > max(od.buy_orders.keys()):
-            orders.append(Order("RAINFOREST_RESIN", buy_price, buy_size))
+        # Always create both buy and sell orders with tight spread
+        buy_price = max(od.buy_orders.keys())  # Use best bid
+        orders.append(Order("RAINFOREST_RESIN", buy_price, buy_size))
 
-        sell_price = fair_value + spread // 2
-        if sell_price < min(od.sell_orders.keys()):
-            orders.append(Order("RAINFOREST_RESIN", sell_price, -sell_size))
+        sell_price = min(od.sell_orders.keys())  # Use best ask
+        orders.append(Order("RAINFOREST_RESIN", sell_price, -sell_size))
+                
         return orders
 
     def run_resin(self, sub_state: TradingState):
@@ -169,164 +210,198 @@ class Trader:
     #
     # ========= PATTERN RECOGNITION METHODS =========
     #
-    def calculate_rsi(self, prices: deque, period=14) -> float:
-        if len(prices) < period + 1:
-            return 50
-        arr = np.array(list(prices)[-period-1:])
-        deltas = np.diff(arr)
-        gains = np.maximum(deltas, 0)
-        losses = np.abs(np.minimum(deltas, 0))
-        avg_gain = np.mean(gains)
-        avg_loss = np.mean(losses)
-        if avg_loss == 0:
-            return 100
-        rs = avg_gain / avg_loss
-        return 100 - (100 / (1 + rs))
-
-    def pattern_calculate_volatility(self, prices: deque, window=20) -> float:
-        if len(prices) < window:
-            return 0.01
-        recent = list(prices)[-window:]
-        return np.std(recent) / np.mean(recent)
-
-    def detect_patterns(self, product: str, price: float):
-        prices = self.pattern_price_history[product]
-        if len(prices) < 5:
+    def detect_patterns(self, product, prices):
+        if len(prices) < 20:
             return None
-        pattern = None
-        recent_prices = list(prices)[-5:]
-        if len(prices) > 2:
-            if len(recent_prices) >= 3 and recent_prices[-2] > recent_prices[-3] and recent_prices[-2] > recent_prices[-1]:
+        
+        # Get recent price data
+        recent_prices = list(prices)[-20:]
+        
+        # Calculate price changes
+        price_changes = [recent_prices[i] - recent_prices[i-1] for i in range(1, len(recent_prices))]
+        
+        # Update recent highs and lows
+        if len(recent_prices) >= 3:
+            if recent_prices[-2] > recent_prices[-3] and recent_prices[-2] > recent_prices[-1]:
                 self.recent_highs[product].append(recent_prices[-2])
-            if len(recent_prices) >= 3 and recent_prices[-2] < recent_prices[-3] and recent_prices[-2] < recent_prices[-1]:
+            if recent_prices[-2] < recent_prices[-3] and recent_prices[-2] < recent_prices[-1]:
                 self.recent_lows[product].append(recent_prices[-2])
-            if len(self.recent_lows[product]) >= 2:
-                lows = list(self.recent_lows[product])
-                if abs(lows[-1] - lows[-2]) / lows[-1] < 0.03:
-                    pattern = "double_bottom"
-            if len(self.recent_highs[product]) >= 2:
-                highs = list(self.recent_highs[product])
-                if abs(highs[-1] - highs[-2]) / highs[-1] < 0.03:
-                    pattern = "double_top"
-        if len(prices) > 10:
-            rng = max(list(prices)[-10:]) - min(list(prices)[-10:])
-            if rng > 0:
-                if price > max(list(prices)[-10:-1]) * 1.02:
-                    pattern = "breakout_up"
-                elif price < min(list(prices)[-10:-1]) * 0.98:
-                    pattern = "breakout_down"
-        rsi_val = self.calculate_rsi(prices, self.rsi_period)
-        self.rsi_values[product].append(rsi_val)
-        vol_val = self.pattern_calculate_volatility(prices, self.volatility_window_pattern)
-        self.volatility_values[product].append(vol_val)
-        if rsi_val < self.rsi_oversold:
-            pattern = "oversold"
-        if rsi_val > self.rsi_overbought:
-            pattern = "overbought"
-        if len(self.volatility_values[product]) > 5:
-            avg_vol = np.mean(list(self.volatility_values[product])[-5:])
-            if vol_val > avg_vol * self.volatility_breakout_threshold:
-                pattern = "volatility_breakout_up" if recent_prices[-1] > recent_prices[-2] else "volatility_breakout_down"
-        return pattern
-
-    def determine_market_state(self, product: str, pattern: str) -> str:
-        rsi_hist = self.rsi_values[product]
-        rsi_val = rsi_hist[-1] if len(rsi_hist) else 50
-        state = "neutral"
-        if pattern in ["double_bottom", "oversold", "breakout_up", "volatility_breakout_up"]:
-            state = "bullish"
-        elif pattern in ["double_top", "overbought", "breakout_down", "volatility_breakout_down"]:
-            state = "bearish"
-        if rsi_val < 20:
-            state = "strongly_bullish"
-        elif rsi_val > 80:
-            state = "strongly_bearish"
-        return state
-
-    def calculate_position_size(self, product: str, price: float, state: str) -> int:
-        size = self.base_trade_size
-        if state in ["strongly_bullish", "strongly_bearish"]:
-            size = int(size * 1.5)
-        current_pos = self.positions_pattern[product]
-        factor = max(0.5, 1.0 - (abs(current_pos) / self.position_limit_pattern) * 0.7)
-        size = max(1, int(size * factor))
-        if len(self.volatility_values[product]) > 5:
-            recent_vol = self.volatility_values[product][-1]
-            avg_vol = np.mean(list(self.volatility_values[product])[-5:])
-            if recent_vol > avg_vol * 1.5:
-                size = max(1, int(size * 0.7))
-            elif recent_vol < avg_vol * 0.5:
-                size = min(self.max_trade_size, int(size * 1.2))
-        size = min(size, self.max_trade_size)
-        available_long = self.position_limit_pattern - current_pos
-        available_short = self.position_limit_pattern + current_pos
-        if state in ["bullish", "strongly_bullish"]:
-            size = min(size, available_long)
-        elif state in ["bearish", "strongly_bearish"]:
-            size = min(size, available_short)
-        return size
-
-    def should_exit_trade(self, product: str) -> bool:
-        if self.trade_duration[product] > self.max_trade_duration:
-            return True
-        curr_pos = self.positions_pattern[product]
-        curr_state = self.market_state[product]
-        if curr_pos > 0 and curr_state in ["bearish", "strongly_bearish"]:
-            return True
-        if curr_pos < 0 and curr_state in ["bullish", "strongly_bullish"]:
-            return True
-        return False
+        
+        # Calculate short-term and long-term moving averages
+        short_ma = sum(recent_prices[-5:]) / 5
+        long_ma = sum(recent_prices[-15:]) / 15
+        
+        # Calculate RSI
+        if len(price_changes) >= 14:
+            gains = [max(0, change) for change in price_changes[-14:]]
+            losses = [abs(min(0, change)) for change in price_changes[-14:]]
+            
+            avg_gain = sum(gains) / 14
+            avg_loss = sum(losses) / 14
+            
+            if avg_loss == 0:
+                rsi = 100
+            else:
+                rs = avg_gain / avg_loss
+                rsi = 100 - (100 / (1 + rs))
+            
+            self.rsi_values[product].append(rsi)
+        
+        # Detect patterns
+        if len(self.rsi_values[product]) > 0:
+            rsi = self.rsi_values[product][-1]
+            
+            # Trend following
+            if short_ma > long_ma * 1.01:
+                return "uptrend"
+            elif short_ma < long_ma * 0.99:
+                return "downtrend"
+            
+            # Oversold/overbought conditions
+            if rsi < 30:
+                return "oversold"
+            elif rsi > 70:
+                return "overbought"
+        
+        # Check for double tops/bottoms
+        if len(self.recent_highs[product]) >= 2:
+            last_two_highs = list(self.recent_highs[product])[-2:]
+            if abs(last_two_highs[0] - last_two_highs[1]) / last_two_highs[0] < 0.02:
+                return "double_top"
+                
+        if len(self.recent_lows[product]) >= 2:
+            last_two_lows = list(self.recent_lows[product])[-2:]
+            if abs(last_two_lows[0] - last_two_lows[1]) / last_two_lows[0] < 0.02:
+                return "double_bottom"
+        
+        return "neutral"
 
     def run_pattern(self, sub_state: TradingState):
         self.iteration_pattern += 1
         result = {}
-        pl_diff = 0
-        if hasattr(sub_state, 'observations') and sub_state.observations:
-            try:
-                pl_diff = float(sub_state.observations.PROFIT_AND_LOSS)
-            except Exception:
-                pl_diff = 0
-            self.historical_pl = pl_diff
+        
         for product in self.pattern_products:
             od = sub_state.order_depths.get(product, OrderDepth())
             if not od.buy_orders or not od.sell_orders:
                 continue
+                
             best_bid = max(od.buy_orders.keys())
             best_ask = min(od.sell_orders.keys())
             mid_price = (best_bid + best_ask) / 2
+            
+            # Store price history
             self.pattern_price_history[product].append(mid_price)
+            
+            # Get current position
             current_pos = sub_state.position.get(product, 0)
             self.positions_pattern[product] = current_pos
-            self.trade_duration[product] = self.trade_duration.get(product, 0) + (1 if current_pos != 0 else 0)
-            pattern = self.detect_patterns(product, mid_price)
+            
+            # Skip if we don't have enough price history
+            if len(self.pattern_price_history[product]) < 20:
+                continue
+            
+            # Detect patterns and update market state
+            pattern = self.detect_patterns(product, self.pattern_price_history[product])
             self.pattern_detected[product] = pattern
-            mkt_state = self.determine_market_state(product, pattern)
-            self.market_state[product] = mkt_state
-            orders = []
-            if current_pos != 0 and self.should_exit_trade(product):
-                orders.append(Order(product, best_bid if current_pos > 0 else best_ask, -current_pos))
-                self.trade_duration[product] = 0
-            else:
-                if current_pos == 0 or \
-                   (current_pos > 0 and mkt_state in ["bullish", "strongly_bullish"]) or \
-                   (current_pos < 0 and mkt_state in ["bearish", "strongly_bearish"]):
-                    trade_size = self.calculate_position_size(product, mid_price, mkt_state)
-                    if mkt_state in ["bullish", "strongly_bullish"]:
-                        buy_size = min(trade_size, self.position_limit_pattern - current_pos)
-                        if buy_size > 0:
-                            orders.append(Order(product, best_ask, buy_size))
-                        if current_pos == 0:
-                            self.trade_started_at[product] = self.iteration_pattern
-                    elif mkt_state in ["bearish", "strongly_bearish"]:
-                        sell_size = min(trade_size, self.position_limit_pattern + current_pos)
-                        if sell_size > 0:
-                            orders.append(Order(product, best_bid, -sell_size))
-                        if current_pos == 0:
-                            self.trade_started_at[product] = self.iteration_pattern
-            if orders:
-                result[product] = orders
-        debug_info = f"Iter: {self.iteration_pattern}, PL: {pl_diff:.2f}"
-        return result, 0, debug_info
+            
+            # Trade based on detected pattern
+            if pattern == "uptrend" or pattern == "double_bottom":
+                # Bullish signals - buy aggressively if we're not already at our position limit
+                if current_pos < self.position_limit_pattern:
+                    buy_size = min(15, self.position_limit_pattern - current_pos)
+                    result[product] = [Order(product, best_ask, buy_size)]
+            
+            elif pattern == "downtrend" or pattern == "double_top":
+                # Bearish signals - sell aggressively if we're not already at our negative position limit
+                if current_pos > -self.position_limit_pattern:
+                    sell_size = min(15, self.position_limit_pattern + current_pos)
+                    result[product] = [Order(product, best_bid, -sell_size)]
+            
+            elif pattern == "oversold":
+                # Oversold - good buying opportunity
+                if current_pos < self.position_limit_pattern:
+                    buy_size = min(10, self.position_limit_pattern - current_pos)
+                    result[product] = [Order(product, best_ask, buy_size)]
+            
+            elif pattern == "overbought":
+                # Overbought - good selling opportunity
+                if current_pos > -self.position_limit_pattern:
+                    sell_size = min(10, self.position_limit_pattern + current_pos)
+                    result[product] = [Order(product, best_bid, -sell_size)]
+            
+            # Simple mean reversion if no strong patterns detected
+            elif pattern == "neutral":
+                mean_price = sum(list(self.pattern_price_history[product])[-10:]) / 10
+                
+                if mid_price > mean_price * 1.01:  # Price is above mean, sell
+                    sell_size = min(8, self.position_limit_pattern + current_pos)
+                    if sell_size > 0:
+                        result[product] = [Order(product, best_bid, -sell_size)]
+                elif mid_price < mean_price * 0.99:  # Price is below mean, buy
+                    buy_size = min(8, self.position_limit_pattern - current_pos)
+                    if buy_size > 0:
+                        result[product] = [Order(product, best_ask, buy_size)]
+        
+        return result, 0, f"Iter: {self.iteration_pattern}"
+
+    def simple_linear_regression(self, x, y):
+        """
+        Calculate simple linear regression using numpy.
+        Returns slope, intercept, and R-squared.
+        """
+        n = len(x)
+        if n < 2:
+            return 0, 0, 0
+        
+        # Calculate means
+        mean_x = np.mean(x)
+        mean_y = np.mean(y)
+        
+        # Calculate slope (beta)
+        numerator = np.sum((x - mean_x) * (y - mean_y))
+        denominator = np.sum((x - mean_x) ** 2)
+        
+        if denominator == 0:
+            return 0, mean_y, 0
+            
+        slope = numerator / denominator
+        
+        # Calculate intercept (alpha)
+        intercept = mean_y - slope * mean_x
+        
+        # Calculate R-squared
+        y_pred = slope * x + intercept
+        ss_total = np.sum((y - mean_y) ** 2)
+        ss_residual = np.sum((y - y_pred) ** 2)
+        
+        if ss_total == 0:
+            r_squared = 0
+        else:
+            r_squared = 1 - (ss_residual / ss_total)
+            
+        return slope, intercept, r_squared
+
+    def linear_regression_predict(self, prices, forecast_horizon=5):
+        """
+        Use linear regression to predict future prices based on historical data.
+        Returns predicted prices and the slope of the trend.
+        """
+        if len(prices) < 10:  # Need sufficient data for prediction
+            return None, 0
+            
+        # Convert to numpy array for processing
+        price_array = np.array(list(prices))
+        x = np.arange(len(price_array))
+        
+        # Fit linear regression model
+        slope, intercept, r_squared = self.simple_linear_regression(x, price_array)
+        
+        # Predict future prices
+        future_predictions = []
+        for i in range(len(price_array), len(price_array) + forecast_horizon):
+            future_predictions.append(slope * i + intercept)
+        
+        return np.array(future_predictions), slope
 
     #
     # ========= VOLCANO OPTIONS METHODS =========
@@ -347,18 +422,31 @@ class Trader:
         return volatility, momentum, mean_reversion, trend, recent_accuracy
 
     def predict_future_price_volcano(self) -> tuple:
-        """Predict future price for the underlying using volcano features"""
+        """Predict future price for the underlying using volcano features and linear regression"""
         if len(self.volcano_price_history[self.volcano_underlying]) < 5:
             return None, 0.0
+        
+        # Get the underlying price history
         prices = np.array(list(self.volcano_price_history[self.volcano_underlying]))
-        volatility, momentum, mean_reversion, trend, recent_accuracy = self.calculate_features_volcano(prices)
-        momentum_weight = 1.0 - min(1.0, abs(mean_reversion) * 2)
-        base_prediction = prices[-1]
-        prediction = base_prediction * (1 + 0.3 * momentum * momentum_weight - 0.2 * mean_reversion - 0.1 * trend)
-        volatility_factor = 1 - min(1.0, volatility * 10)
-        mean_reversion_factor = 1 - min(1.0, abs(mean_reversion))
-        confidence = volatility_factor * mean_reversion_factor * recent_accuracy
-        return prediction, confidence
+        
+        # Use linear regression for primary prediction
+        future_prices, trend_slope = self.linear_regression_predict(self.volcano_price_history[self.volcano_underlying], 5)
+        
+        # If linear regression provides a prediction, use it as the base
+        if future_prices is not None:
+            base_prediction = future_prices[0]  # Use the first predicted price
+            confidence = min(1.0, 0.6 + abs(trend_slope) * 5)  # Scale confidence based on trend strength
+        else:
+            # Fall back to the old method if linear regression doesn't have enough data
+            volatility, momentum, mean_reversion, trend, recent_accuracy = self.calculate_features_volcano(prices)
+            momentum_weight = 1.0 - min(1.0, abs(mean_reversion) * 2)
+            base_prediction = prices[-1]
+            base_prediction = base_prediction * (1 + 0.3 * momentum * momentum_weight - 0.2 * mean_reversion - 0.1 * trend)
+            volatility_factor = 1 - min(1.0, volatility * 10)
+            mean_reversion_factor = 1 - min(1.0, abs(mean_reversion))
+            confidence = volatility_factor * mean_reversion_factor * recent_accuracy
+        
+        return base_prediction, confidence
 
     def calculate_m_t_v_t(self, spot_price: float, strike_price: int, TTE: float, option_price: float) -> tuple:
         """
@@ -431,67 +519,32 @@ class Trader:
 
     def run_volcano(self, sub_state: TradingState):
         result = {}
-        if self.volcano_initial_capital == 0:
-            try:
-                self.volcano_initial_capital = float(sub_state.traderData) if sub_state.traderData else 0
-            except (ValueError, TypeError):
-                self.volcano_initial_capital = 0
-        self.volcano_current_capital = self.volcano_initial_capital
-        self.volcano_max_capital = max(self.volcano_max_capital, self.volcano_current_capital)
-        drawdown = (self.volcano_max_capital - self.volcano_current_capital) / self.volcano_max_capital if self.volcano_max_capital > 0 else 0
-        if drawdown > self.volcano_max_drawdown:
-            return result, 0, ""
-        if self.volcano_underlying in sub_state.order_depths:
-            spot_depth = sub_state.order_depths[self.volcano_underlying]
-            if spot_depth.buy_orders and spot_depth.sell_orders:
-                spot_best_bid = max(spot_depth.buy_orders.keys())
-                spot_best_ask = min(spot_depth.sell_orders.keys())
-                spot_mid_price = (spot_best_bid + spot_best_ask) / 2
-                self.update_volcano_price_history(self.volcano_underlying, spot_mid_price)
-                predicted_price, confidence = self.predict_future_price_volcano()
-                if predicted_price is not None:
-                    for option_name, strike_price in self.volcano_options.items():
-                        if option_name in sub_state.order_depths:
-                            option_depth = sub_state.order_depths[option_name]
-                            if option_depth.buy_orders and option_depth.sell_orders:
-                                option_best_bid = max(option_depth.buy_orders.keys())
-                                option_best_ask = min(option_depth.sell_orders.keys())
-                                option_mid_price = (option_best_bid + option_best_ask) / 2
-                                self.update_volcano_price_history(option_name, option_mid_price)
-                                direction, quantity = self.find_trading_opportunity_volcano(
-                                    spot_mid_price, option_mid_price, strike_price,
-                                    predicted_price, confidence
-                                )
-                                if direction is not None:
-                                    spot_position = sub_state.position.get(self.volcano_underlying, 0)
-                                    option_position = sub_state.position.get(option_name, 0)
-                                    if direction == "SELL_OPTION":
-                                        max_option_quantity = min(
-                                            self.volcano_position_limits[option_name] + option_position,
-                                            quantity
-                                        )
-                                        max_spot_quantity = min(
-                                            self.volcano_position_limits[self.volcano_underlying] - spot_position,
-                                            quantity
-                                        )
-                                        final_quantity = min(max_option_quantity, max_spot_quantity)
-                                        if final_quantity > 0:
-                                            result[option_name] = [Order(option_name, option_best_bid, -final_quantity)]
-                                            self.volcano_last_trade_prices[option_name] = option_mid_price
-                                    elif direction == "BUY_OPTION":
-                                        max_option_quantity = min(
-                                            self.volcano_position_limits[option_name] - option_position,
-                                            quantity
-                                        )
-                                        max_spot_quantity = min(
-                                            self.volcano_position_limits[self.volcano_underlying] + spot_position,
-                                            quantity
-                                        )
-                                        final_quantity = min(max_option_quantity, max_spot_quantity)
-                                        if final_quantity > 0:
-                                            result[option_name] = [Order(option_name, option_best_ask, final_quantity)]
-                                            self.volcano_last_trade_prices[option_name] = option_mid_price
-        return result, 0, str(self.volcano_current_capital)
+        
+        # Skip all the complex logic and just trade the two profitable options aggressively
+        for option_name, strike_price in self.volcano_options.items():
+            if option_name in sub_state.order_depths:
+                option_depth = sub_state.order_depths[option_name]
+                if option_depth.buy_orders and option_depth.sell_orders:
+                    option_best_bid = max(option_depth.buy_orders.keys())
+                    option_best_ask = min(option_depth.sell_orders.keys())
+                    
+                    # Get current position
+                    option_position = sub_state.position.get(option_name, 0)
+                    max_position = self.volcano_position_limits[option_name]
+                    
+                    # Simple strategy: if position is negative, buy; if position is positive, sell
+                    if option_position < 0:
+                        # We're short, so buy to reduce position
+                        buy_quantity = min(max_position + option_position, 10)
+                        if buy_quantity > 0:
+                            result[option_name] = [Order(option_name, option_best_ask, buy_quantity)]
+                    else:
+                        # We're long or neutral, so sell
+                        sell_quantity = min(max_position - option_position, 10)
+                        if sell_quantity > 0:
+                            result[option_name] = [Order(option_name, option_best_bid, -sell_quantity)]
+        
+        return result, 0, ""
 
     #
     # ========= MAIN run() METHOD =========
@@ -507,8 +560,21 @@ class Trader:
         state_volcano = self.create_sub_state(global_state, self.volcano_positions)
         orders_volcano, conv_volcano, data_volcano = self.run_volcano(state_volcano)
 
-        # Combine orders from each strategy without netting (no volcano underlying orders)
-        combined_orders = self.combine_orders_no_netting([orders_resin, orders_pattern, orders_volcano])
+        # Simplified combined orders - Don't filter any products to ensure trading happens
+        combined_orders = {}
+        
+        # Add orders from each strategy
+        for strategy_orders in [orders_resin, orders_pattern, orders_volcano]:
+            for product, orders in strategy_orders.items():
+                # Skip SQUID_INK as it was not profitable previously
+                if product == "SQUID_INK":
+                    continue
+                    
+                # For all other products, include the orders without filtering
+                if product not in combined_orders:
+                    combined_orders[product] = []
+                combined_orders[product].extend(orders)
+                
         conversions = conv_resin + conv_pattern + conv_volcano
         combined_data = f"{data_resin} | {data_pattern} | {data_volcano}"
         return combined_orders, conversions, combined_data
