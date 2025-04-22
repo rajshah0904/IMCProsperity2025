@@ -10,7 +10,6 @@ class Trader:
         # ========= Sub-accounts for each strategy ==========
         self.resin_positions: Dict[str, int] = defaultdict(int)
         self.pattern_positions: Dict[str, int] = defaultdict(int)
-        self.volcano_positions: Dict[str, int] = defaultdict(int)
         self.macaron_positions: Dict[str, int] = defaultdict(int)
 
         # ========= Resin Market Maker Parameters ==========
@@ -42,31 +41,6 @@ class Trader:
         self.pattern_detected = {p: None for p in self.pattern_products}
         self.historical_pl = 0
         self.trade_started_at = {p: 0 for p in self.pattern_products}
-
-        # ========= Volcano Options Parameters ==========
-        self.volcano_underlying = "VOLCANIC_ROCK"
-        self.volcano_options = {
-            "VOLCANIC_ROCK_VOUCHER_9500": 9500,
-            "VOLCANIC_ROCK_VOUCHER_9750": 9750,
-            "VOLCANIC_ROCK_VOUCHER_10000": 10000,
-            "VOLCANIC_ROCK_VOUCHER_10250": 10250,
-            "VOLCANIC_ROCK_VOUCHER_10500": 10500
-        }
-        self.volcano_position_limits = {self.volcano_underlying: 300}
-        for opt in self.volcano_options:
-            self.volcano_position_limits[opt] = 100
-        self.volcano_price_history = {self.volcano_underlying: deque(maxlen=100)}
-        for opt in self.volcano_options:
-            self.volcano_price_history[opt] = deque(maxlen=100)
-        self.volcano_confidence_threshold = 0.7
-        self.volcano_min_profit = 10
-        self.volcano_safety_margin = 0.05
-        self.volcano_base_quantity = 25
-        self.volcano_max_drawdown = 0.1
-        self.volcano_initial_capital = 0
-        self.volcano_current_capital = 0
-        self.volcano_max_capital = 0
-        self.volcano_last_trade_prices: Dict[str, float] = {}
 
         # ========= MAGNIFICENT MACARONS Parameters ==========
         self.macaron_product = "MAGNIFICENT_MACARONS"
@@ -119,8 +93,7 @@ class Trader:
         combined: Dict[str, List[Order]] = {}
         for strat_orders in orders_list:
             for product, orders in strat_orders.items():
-                if product != self.volcano_underlying:
-                    combined.setdefault(product, []).extend(orders)
+                combined.setdefault(product, []).extend(orders)
         return combined
 
     # ========= RESIN MARKET MAKER METHODS =========
@@ -230,74 +203,6 @@ class Trader:
                 res[p]=orders
                 debug=f"PATTERN {p}:{pattern}"
         return res, 0, debug
-
-    # ========= VOLCANO OPTIONS METHODS =========
-    def update_volcano_price_history(self, prod: str, price: float):
-        self.volcano_price_history[prod].append(price)
-
-    def calculate_features_volcano(self, prices: np.ndarray) -> Tuple[float,float,float,float,float]:
-        if len(prices)<5: return 0,0,0,0,0
-        rets=np.diff(prices)/prices[:-1]
-        vol=np.std(rets[-5:])
-        mom=(prices[-1]-prices[-5])/prices[-5]
-        rev=(prices[-1]-np.mean(prices[-10:]))/np.mean(prices[-10:]) if len(prices)>=10 else 0
-        trend=(prices[-1]-prices[-3])/prices[-3] if len(prices)>=3 else 0
-        acc=1-np.mean(np.abs(np.diff(prices[-5:])/prices[-5:-1]))
-        return vol,mom,rev,trend,acc
-
-    def predict_future_price_volcano(self) -> Tuple[float,float]:
-        hist=self.volcano_price_history[self.volcano_underlying]
-        if len(hist)<5: return None,0
-        arr=np.array(hist)
-        vol,mom,rev,trend,acc=self.calculate_features_volcano(arr)
-        base=arr[-1]
-        pred=base*(1+0.3*mom*(1-min(1,abs(rev)*2))-0.2*rev-0.1*trend)
-        conf=(1-min(1,vol*10))*(1-min(1,abs(rev)))*acc
-        return pred,conf
-
-    def find_trading_opportunity_volcano(self,spot,opt_price,strike,pred,conf)->Tuple[str,int]:
-        if conf<self.volcano_confidence_threshold: return None,0
-        intrinsic=pred-strike
-        cur_intr=max(0,spot-strike)
-        diff=opt_price-(intrinsic-self.volcano_safety_margin*spot)
-        if abs(diff)<self.volcano_min_profit: return None,0
-        qty=int(self.volcano_base_quantity*conf*min(1,abs(diff)/spot)*(1-min(1,np.std(np.diff(np.array(self.volcano_price_history[self.volcano_underlying]))))*5))
-        qty=max(1,qty)
-        return ("BUY_OPTION",qty) if diff>0 else ("SELL_OPTION",qty)
-
-    def run_volcano(self, sub: TradingState) -> Tuple[Dict[str,List[Order]],int,str]:
-        res={}
-        if self.volcano_initial_capital==0:
-            try: self.volcano_initial_capital=float(sub.traderData)
-            except: self.volcano_initial_capital=0
-        self.volcano_current_capital=self.volcano_initial_capital
-        self.volcano_max_capital=max(self.volcano_max_capital,self.volcano_current_capital)
-        if self.volcano_max_capital>0 and (self.volcano_max_capital-self.volcano_current_capital)/self.volcano_max_capital>self.volcano_max_drawdown:
-            return res,0,""
-        if self.volcano_underlying in sub.order_depths:
-            od=sub.order_depths[self.volcano_underlying]
-            if od.buy_orders and od.sell_orders:
-                mid=(max(od.buy_orders)+min(od.sell_orders))/2
-                self.update_volcano_price_history(self.volcano_underlying,mid)
-                pred,conf=self.predict_future_price_volcano()
-                if pred is not None:
-                    for opt,strike in self.volcano_options.items():
-                        od_opt=sub.order_depths.get(opt)
-                        if not od_opt: continue
-                        if not od_opt.buy_orders or not od_opt.sell_orders: continue
-                        mid_opt=(max(od_opt.buy_orders)+min(od_opt.sell_orders))/2
-                        self.update_volcano_price_history(opt,mid_opt)
-                        dir,qty=self.find_trading_opportunity_volcano(mid,mid_opt,strike,pred,conf)
-                        if dir and qty>0:
-                            pos_spot=sub.position.get(self.volcano_underlying,0)
-                            pos_opt=sub.position.get(opt,0)
-                            if dir=="SELL_OPTION":
-                                qty=min(qty,pos_opt+self.volcano_position_limits[opt],self.volcano_position_limits[self.volcano_underlying]-pos_spot)
-                                if qty>0: res[opt]=[Order(opt,max(od_opt.buy_orders),-qty)]
-                            else:
-                                qty=min(qty,self.volcano_position_limits[opt]-pos_opt,self.volcano_position_limits[self.volcano_underlying]+pos_spot)
-                                if qty>0: res[opt]=[Order(opt,min(od_opt.sell_orders),qty)]
-        return res,0,str(self.volcano_current_capital)
 
     # ========= MACARON MARKET MAKER METHODS =========
     def update_environmental_data(self, obs: ConversionObservation, pos: int):
@@ -420,13 +325,10 @@ class Trader:
         sp = self.create_sub_state(global_state, self.pattern_positions)
         op,cp,dp = self.run_pattern(sp)
         
-        sv = self.create_sub_state(global_state, self.volcano_positions)
-        ov,cv,dv = self.run_volcano(sv)
-        
         sm = self.create_sub_state(global_state, self.macaron_positions)
         om,cm,dm = self.run_macarons(sm)
         
-        combined = self.combine_orders_no_netting([or_,op,ov,om])
-        conv = cr+cp+cv+cm
-        data = "|".join([dr,dp,dv,dm])
+        combined = self.combine_orders_no_netting([or_,op,om])
+        conv = cr+cp+cm
+        data = "|".join([dr,dp,dm])
         return combined,conv,data
