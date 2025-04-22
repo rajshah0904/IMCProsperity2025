@@ -12,7 +12,6 @@ class Trader:
         self.pattern_positions: Dict[str, int] = defaultdict(int)
         self.volcano_positions: Dict[str, int] = defaultdict(int)
         self.macaron_positions: Dict[str, int] = defaultdict(int)
-        self.basket_positions: Dict[str, int] = defaultdict(int)
 
         # ========= Resin Market Maker Parameters ==========
         self.alloc_resin = 0.20
@@ -21,13 +20,13 @@ class Trader:
         self.base_position_size = int(10 * self.alloc_resin)
         self.max_spread = 8
         self.min_spread = 2
-        self.volatility_window = 20
+        self.volatility_window = 20 
         self.resin_price_history: List[float] = []
 
         # ========= Pattern Recognition Parameters ==========
         self.alloc_pattern = 0.20
         self.iteration_pattern = 0
-        self.pattern_products = ["SQUID_INK", "KELP"]
+        self.pattern_products = ["SQUID_INK"]
         self.pattern_price_history = {p: deque(maxlen=100) for p in self.pattern_products}
         self.recent_highs = {p: deque(maxlen=10) for p in self.pattern_products}
         self.recent_lows = {p: deque(maxlen=10) for p in self.pattern_products}
@@ -103,63 +102,6 @@ class Trader:
             "avg_trade_price": 0,
             "total_volume": 0
         }
-
-        # ========= PICNIC BASKET Parameters ==========
-        self.alloc_basket = 0.20
-        self.basket_products = {
-            "PICNIC_BASKET1": {
-                "components": {
-                    "CROISSANTS": 6,
-                    "JAMS": 3,
-                    "DJEMBES": 1
-                },
-                "position_limit": int(70 * self.alloc_basket)
-            },
-            "PICNIC_BASKET2": {
-                "components": {
-                    "CROISSANTS": 4,
-                    "DJEMBES": 2
-                },
-                "position_limit": int(70 * self.alloc_basket)
-            }
-        }
-        self.basket_position_limits = {
-            "CROISSANTS": int(300 * self.alloc_basket),
-            "JAMS": int(300 * self.alloc_basket),
-            "DJEMBES": int(100 * self.alloc_basket)
-        }
-        self.basket_min_profit = 10
-        self.basket_price_history = {
-            product: deque(maxlen=100)
-            for product in ["PICNIC_BASKET1", "PICNIC_BASKET2", "CROISSANTS", "JAMS", "DJEMBES"]
-        }
-        self.basket_coefficients = {
-            "CROISSANTS": {
-                'ar_coef': [-0.13778924473364898, -0.017001430663861707,
-                            -0.007126079130103736, 0.003956475454297141,
-                            0.0005939005629995958],
-                'ma_coef': [0.0] * 5,
-                'intercept': -0.13778924473364898,
-                'sigma2': 1.0
-            },
-            "JAMS": {
-                'ar_coef': [-0.07681975802925964, 0.00855102932364836,
-                            0.004110743183574504, -0.001057105898536105,
-                            -0.0070153095407396475],
-                'ma_coef': [0.0] * 5,
-                'intercept': -0.07681975802925964,
-                'sigma2': 1.0
-            },
-            "DJEMBES": {
-                'ar_coef': [0.014983408336735213, 0.009723454198626398,
-                            -0.0072454381893885264, 0.0010821369386140355,
-                            -0.002663542650568304],
-                'ma_coef': [0.0] * 5,
-                'intercept': 0.014983408336735213,
-                'sigma2': 1.0
-            }
-        }
-        self.basket_std_threshold = 1.5
 
     def create_sub_state(self, global_state: TradingState, local_positions: Dict[str, int]) -> TradingState:
         return TradingState(
@@ -470,162 +412,6 @@ class Trader:
         res = {self.macaron_product:orders}
         return res,conv,jsonpickle.encode(self.macaron_state)
 
-    # ========= PICNIC BASKET METHODS =========
-    def update_basket_price_history(self, product: str, price: float):
-        self.basket_price_history[product].append(price)
-
-    def predict_price(self, product: str) -> float:
-        if len(self.basket_price_history[product]) < 5:
-            return None
-        prices = list(self.basket_price_history[product])
-        coeffs = self.basket_coefficients[product]
-        prediction = coeffs['intercept']
-        for i in range(5):
-            if i < len(prices):
-                prediction += coeffs['ar_coef'][i] * prices[-(i+1)]
-        return prediction
-
-    def find_prediction_opportunity(self, product: str, current_price: float) -> (str, float):
-        prediction = self.predict_price(product)
-        if prediction is None:
-            return None, 0
-        recent_prices = list(self.basket_price_history[product])[-20:]
-        if len(recent_prices) < 2:
-            return None, 0
-        std = np.std(recent_prices)
-        if std == 0:
-            return None, 0
-        z_score = (current_price - prediction) / std
-        if abs(z_score) > self.basket_std_threshold:
-            return ("SELL", abs(z_score)) if z_score > 0 else ("BUY", abs(z_score))
-        return None, 0
-
-    def calculate_basket_value(self, basket_name: str, order_depths: Dict[str, OrderDepth]) -> float:
-        basket = self.basket_products[basket_name]
-        total_value = 0.0
-        for component, quantity in basket["components"].items():
-            od = order_depths.get(component, OrderDepth())
-            if not od.buy_orders or not od.sell_orders:
-                return None
-            best_bid = max(od.buy_orders.keys())
-            best_ask = min(od.sell_orders.keys())
-            mid_price = (best_bid + best_ask) / 2
-            self.update_basket_price_history(component, mid_price)
-            total_value += mid_price * quantity
-        return total_value
-
-    def find_arbitrage_opportunity(self, basket_name: str, basket_price: float, component_value: float) -> (str, float):
-        if component_value is None:
-            return None, 0
-        diff = basket_price - component_value
-        if abs(diff) < self.basket_min_profit:
-            return None, 0
-        return ("SELL", diff) if diff > 0 else ("BUY", abs(diff))
-
-    def execute_arbitrage(self, sub_state: TradingState, basket_name: str, direction: str, profit: float) -> Dict[str, List[Order]]:
-        result = {}
-        basket = self.basket_products[basket_name]
-        position_here = sub_state.position.get(basket_name, 0)
-        basket_depth = sub_state.order_depths.get(basket_name, OrderDepth())
-        if not basket_depth.buy_orders or not basket_depth.sell_orders:
-            return result
-
-        best_bid = max(basket_depth.buy_orders.keys())
-        best_ask = min(basket_depth.sell_orders.keys())
-        max_qty = min(
-            basket["position_limit"] - position_here if direction == "BUY" else basket["position_limit"] + position_here,
-            basket_depth.buy_orders[best_bid] if direction == "SELL" else basket_depth.sell_orders[best_ask]
-        )
-        if max_qty <= 0:
-            return result
-
-        if direction == "BUY":
-            result[basket_name] = [Order(basket_name, best_ask, max_qty)]
-        else:
-            result[basket_name] = [Order(basket_name, best_bid, -max_qty)]
-
-        for component, needed in basket["components"].items():
-            comp_pos = sub_state.position.get(component, 0)
-            comp_depth = sub_state.order_depths.get(component, OrderDepth())
-            if not comp_depth.buy_orders or not comp_depth.sell_orders:
-                continue
-            best_comp_bid = max(comp_depth.buy_orders.keys())
-            best_comp_ask = min(comp_depth.sell_orders.keys())
-            comp_limit = self.basket_position_limits[component]
-            comp_max_qty = min(
-                comp_limit - comp_pos if direction == "SELL" else comp_limit + comp_pos,
-                comp_depth.buy_orders[best_comp_bid] if direction == "SELL" else comp_depth.sell_orders[best_comp_ask]
-            )
-            total_comp_qty = min(max_qty * needed, comp_max_qty)
-            if total_comp_qty <= 0:
-                continue
-
-            if direction == "SELL":
-                result[component] = [Order(component, best_comp_bid, total_comp_qty)]
-            else:
-                result[component] = [Order(component, best_comp_ask, -total_comp_qty)]
-        return result
-
-    def execute_prediction_trade(self, sub_state: TradingState, product: str, direction: str, confidence: float) -> Dict[str, List[Order]]:
-        result = {}
-        pos = sub_state.position.get(product, 0)
-        od = sub_state.order_depths.get(product, OrderDepth())
-        if not od.buy_orders or not od.sell_orders:
-            return result
-
-        best_bid = max(od.buy_orders.keys())
-        best_ask = min(od.sell_orders.keys())
-        plimit = self.basket_position_limits[product]
-        max_qty = min(
-            plimit - pos if direction == "BUY" else plimit + pos,
-            od.sell_orders[best_ask] if direction == "BUY" else od.buy_orders[best_bid]
-        )
-        quantity = int(max_qty * min(1.0, confidence / self.basket_std_threshold))
-        if quantity <= 0:
-            return result
-
-        if direction == "BUY":
-            result[product] = [Order(product, best_ask, quantity)]
-        else:
-            result[product] = [Order(product, best_bid, -quantity)]
-        return result
-
-    def run_basket(self, sub_state: TradingState):
-        result = {}
-        for product in ["CROISSANTS", "JAMS", "DJEMBES"]:
-            od = sub_state.order_depths.get(product, OrderDepth())
-            if od.buy_orders and od.sell_orders:
-                best_bid = max(od.buy_orders.keys())
-                best_ask = min(od.sell_orders.keys())
-                mid_price = (best_bid + best_ask) / 2
-                self.update_basket_price_history(product, mid_price)
-        for product in ["CROISSANTS", "JAMS", "DJEMBES"]:
-            od = sub_state.order_depths.get(product, OrderDepth())
-            if not od.buy_orders or not od.sell_orders:
-                continue
-            best_bid = max(od.buy_orders.keys())
-            best_ask = min(od.sell_orders.keys())
-            mid_price = (best_bid + best_ask) / 2
-            direction, confidence = self.find_prediction_opportunity(product, mid_price)
-            if direction is not None:
-                orders = self.execute_prediction_trade(sub_state, product, direction, confidence)
-                result.update(orders)
-        for basket_name in self.basket_products:
-            od_b = sub_state.order_depths.get(basket_name, OrderDepth())
-            if not od_b.buy_orders or not od_b.sell_orders:
-                continue
-            best_bid = max(od_b.buy_orders.keys())
-            best_ask = min(od_b.sell_orders.keys())
-            basket_mid = (best_bid + best_ask) / 2
-            c_val = self.calculate_basket_value(basket_name, sub_state.order_depths)
-            if c_val is None:
-                continue
-            direction, profit = self.find_arbitrage_opportunity(basket_name, basket_mid, c_val)
-            if direction is not None:
-                arb_orders = self.execute_arbitrage(sub_state, basket_name, direction, profit)
-                result.update(arb_orders)
-        return result, 0, ""
-
     # ========= MAIN RUN =========
     def run(self, global_state: TradingState) -> Tuple[Dict[str,List[Order]],int,str]:
         sr = self.create_sub_state(global_state, self.resin_positions)
@@ -640,10 +426,7 @@ class Trader:
         sm = self.create_sub_state(global_state, self.macaron_positions)
         om,cm,dm = self.run_macarons(sm)
         
-        sb = self.create_sub_state(global_state, self.basket_positions)
-        ob,cb,db = self.run_basket(sb)
-        
-        combined = self.combine_orders_no_netting([or_,op,ov,om,ob])
-        conv = cr+cp+cv+cm+cb
-        data = "|".join([dr,dp,dv,dm,db])
+        combined = self.combine_orders_no_netting([or_,op,ov,om])
+        conv = cr+cp+cv+cm
+        data = "|".join([dr,dp,dv,dm])
         return combined,conv,data
