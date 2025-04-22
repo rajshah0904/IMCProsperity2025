@@ -263,7 +263,7 @@ class Trader:
         if abs(diff)<self.volcano_min_profit: return None,0
         qty=int(self.volcano_base_quantity*conf*min(1,abs(diff)/spot)*(1-min(1,np.std(np.diff(np.array(self.volcano_price_history[self.volcano_underlying]))))*5))
         qty=max(1,qty)
-        return ("SELL_OPTION",qty) if diff>0 else ("BUY_OPTION",qty)
+        return ("BUY_OPTION",qty) if diff>0 else ("SELL_OPTION",qty)
 
     def run_volcano(self, sub: TradingState) -> Tuple[Dict[str,List[Order]],int,str]:
         res={}
